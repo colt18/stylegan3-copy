@@ -13,6 +13,7 @@ import numpy as np
 import scipy.signal
 import scipy.optimize
 import torch
+import torch.nn.functional as F
 from torch_utils import misc
 from torch_utils import persistence
 from torch_utils.ops import conv2d_gradfix
@@ -20,6 +21,40 @@ from torch_utils.ops import filtered_lrelu
 from torch_utils.ops import bias_act
 
 #----------------------------------------------------------------------------
+
+class SEBlock(torch.nn.Module):
+    def __init__(self, in_channels):
+        super(SEBlock, self).__init__()
+        self.avg_pool = torch.nn.AdaptiveAvgPool2d(1)  # Squeeze: Global Average Pooling
+        self.fc1 = torch.nn.Conv2d(in_channels, in_channels, 1, bias=False)  # Fully connected layer (bottleneck)
+        self.fc2 = torch.nn.Conv2d(in_channels, in_channels, 1, bias=False)  # Output layer
+        self.sigmoid = torch.nn.Sigmoid()
+
+    def forward(self, x):
+        # Ensure the model and input are on the same device (GPU or CPU)
+        device = x.device  # Get the device of the input tensor (GPU or CPU)
+        
+        # Move model parameters to the same device as the input tensor
+        self.avg_pool = self.avg_pool.to(device)
+        self.fc1 = self.fc1.to(device)
+        self.fc2 = self.fc2.to(device)
+        self.sigmoid = self.sigmoid.to(device)
+
+        # Convert model weights to the same dtype as input
+        if x.dtype == torch.float16:
+            self.fc1 = self.fc1.half()  # Convert to FP16
+            self.fc2 = self.fc2.half()  # Convert to FP16
+
+        # Squeeze step: Compute global average pooling across the input tensor
+        y = self.avg_pool(x)  # Output shape: [batch_size, in_channels, 1, 1]
+        y = F.relu(self.fc1(y))  # Apply ReLU activation
+        y = self.fc2(y)  # Further convolution
+        y = self.sigmoid(y)  # Normalize with sigmoid
+
+        # Dynamically adjust scaling of the input by attention weights
+        return x * y  # Scale the input by the learned attention weight
+
+
 
 @misc.profiled_function
 def modulated_conv2d(
@@ -29,6 +64,7 @@ def modulated_conv2d(
     demodulate  = True, # Apply weight demodulation?
     padding     = 0,    # Padding: int or [padH, padW]
     input_gain  = None, # Optional scale factors for the input channels: [], [in_channels], or [batch_size, in_channels]
+    attention = True     # If True, apply channel attention (Squeeze-and-Excitation)
 ):
     with misc.suppress_tracer_warnings(): # this value will be treated as a constant
         batch_size = int(x.shape[0])
@@ -55,6 +91,14 @@ def modulated_conv2d(
     if input_gain is not None:
         input_gain = input_gain.expand(batch_size, in_channels) # [NI]
         w = w * input_gain.unsqueeze(1).unsqueeze(3).unsqueeze(4) # [NOIkk]
+
+    # Apply attention if specified.
+    if attention:
+
+        # Create and apply SE Block (Squeeze-and-Excitation)
+        se_block = SEBlock(in_channels)
+        x = se_block(x)
+
 
     # Execute as one fused op using grouped convolution.
     x = x.reshape(1, -1, *x.shape[2:])
@@ -347,7 +391,7 @@ class SynthesisLayer(torch.nn.Module):
         # Execute modulated conv2d.
         dtype = torch.float16 if (self.use_fp16 and not force_fp32 and x.device.type == 'cuda') else torch.float32
         x = modulated_conv2d(x=x.to(dtype), w=self.weight, s=styles,
-            padding=self.conv_kernel-1, demodulate=(not self.is_torgb), input_gain=input_gain)
+            padding=self.conv_kernel-1, demodulate=(not self.is_torgb), input_gain=input_gain, attention=True)
 
         # Execute bias, filtered leaky ReLU, and clamping.
         gain = 1 if self.is_torgb else np.sqrt(2)
@@ -403,7 +447,7 @@ class SynthesisNetwork(torch.nn.Module):
         img_channels,                   # Number of color channels.
         channel_base        = 32768,    # Overall multiplier for the number of channels.
         channel_max         = 512,      # Maximum number of channels in any layer.
-        num_layers          = 14,       # Total number of layers, excluding Fourier features and ToRGB.
+        num_layers          = 5,       # Total number of layers, excluding Fourier features and ToRGB.
         num_critical        = 2,        # Number of critically sampled layers at the end.
         first_cutoff        = 2,        # Cutoff frequency of the first layer (f_{c,0}).
         first_stopband      = 2**2.1,   # Minimum stopband of the first layer (f_{t,0}).
