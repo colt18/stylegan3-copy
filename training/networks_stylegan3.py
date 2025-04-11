@@ -61,7 +61,7 @@ def modulated_conv2d(
     x,                  # Input tensor: [batch_size, in_channels, in_height, in_width]
     w,                  # Weight tensor: [out_channels, in_channels, kernel_height, kernel_width]
     s,                  # Style tensor: [batch_size, in_channels]
-    demodulate  = True, # Apply weight demodulation?
+    demodulate  = False, # Apply weight demodulation?
     padding     = 0,    # Padding: int or [padH, padW]
     input_gain  = None, # Optional scale factors for the input channels: [], [in_channels], or [batch_size, in_channels]
     attention = True     # If True, apply channel attention (Squeeze-and-Excitation)
