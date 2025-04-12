@@ -52,7 +52,7 @@ class SEBlock(torch.nn.Module):
         y = self.sigmoid(y)  # Normalize with sigmoid
 
         # Dynamically adjust scaling of the input by attention weights
-        return x * y  # Scale the input by the learned attention weight
+        return (x * y).detach()  # Scale the input by the learned attention weight
 
 
 
