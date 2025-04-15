@@ -23,36 +23,21 @@ from torch_utils.ops import bias_act
 #----------------------------------------------------------------------------
 
 class SEBlock(torch.nn.Module):
-    def __init__(self, in_channels):
+    def __init__(self, in_channels, dtype=torch.float16):
         super(SEBlock, self).__init__()
-        self.avg_pool = torch.nn.AdaptiveAvgPool2d(1)  # Squeeze: Global Average Pooling
-        self.fc1 = torch.nn.Conv2d(in_channels, in_channels, 1, bias=False)  # Fully connected layer (bottleneck)
-        self.fc2 = torch.nn.Conv2d(in_channels, in_channels, 1, bias=False)  # Output layer
-        self.sigmoid = torch.nn.Sigmoid()
+        self.dtype = dtype
+        self.avg_pool = torch.nn.AdaptiveAvgPool2d(1)
+        self.fc1 = torch.nn.Conv2d(in_channels, in_channels, 1, bias=False).to(dtype)
+        self.fc2 = torch.nn.Conv2d(in_channels, in_channels, 1, bias=False).to(dtype)
+        self.sigmoid = torch.nn.Sigmoid().to(dtype)
 
     def forward(self, x):
-        # Ensure the model and input are on the same device (GPU or CPU)
-        device = x.device  # Get the device of the input tensor (GPU or CPU)
-        
-        # Move model parameters to the same device as the input tensor
-        self.avg_pool = self.avg_pool.to(device)
-        self.fc1 = self.fc1.to(device)
-        self.fc2 = self.fc2.to(device)
-        self.sigmoid = self.sigmoid.to(device)
-
-        # Convert model weights to the same dtype as input
-        if x.dtype == torch.float16:
-            self.fc1 = self.fc1.half()  # Convert to FP16
-            self.fc2 = self.fc2.half()  # Convert to FP16
-
-        # Squeeze step: Compute global average pooling across the input tensor
-        y = self.avg_pool(x)  # Output shape: [batch_size, in_channels, 1, 1]
-        y = F.relu(self.fc1(y))  # Apply ReLU activation
-        y = self.fc2(y)  # Further convolution
-        y = self.sigmoid(y)  # Normalize with sigmoid
-
-        # Dynamically adjust scaling of the input by attention weights
-        return (x * y).detach()  # Scale the input by the learned attention weight
+        x = x.to(self.dtype)
+        y = self.avg_pool(x)
+        y = F.relu(self.fc1(y))
+        y = self.fc2(y)
+        y = self.sigmoid(y)
+        return x * y
 
 
 
@@ -61,11 +46,13 @@ def modulated_conv2d(
     x,                  # Input tensor: [batch_size, in_channels, in_height, in_width]
     w,                  # Weight tensor: [out_channels, in_channels, kernel_height, kernel_width]
     s,                  # Style tensor: [batch_size, in_channels]
-    demodulate  = False, # Apply weight demodulation?
+    demodulate  = True, # Apply weight demodulation?
     padding     = 0,    # Padding: int or [padH, padW]
     input_gain  = None, # Optional scale factors for the input channels: [], [in_channels], or [batch_size, in_channels]
-    attention = True     # If True, apply channel attention (Squeeze-and-Excitation)
 ):
+    
+    demodulate = False
+
     with misc.suppress_tracer_warnings(): # this value will be treated as a constant
         batch_size = int(x.shape[0])
     out_channels, in_channels, kh, kw = w.shape
@@ -90,15 +77,7 @@ def modulated_conv2d(
     # Apply input scaling.
     if input_gain is not None:
         input_gain = input_gain.expand(batch_size, in_channels) # [NI]
-        w = w * input_gain.unsqueeze(1).unsqueeze(3).unsqueeze(4) # [NOIkk]
-
-    # Apply attention if specified.
-    if attention:
-
-        # Create and apply SE Block (Squeeze-and-Excitation)
-        se_block = SEBlock(in_channels)
-        x = se_block(x)
-
+        w = w * input_gain.unsqueeze(1).unsqueeze(3).unsqueeze(4) # [NOIkk]    
 
     # Execute as one fused op using grouped convolution.
     x = x.reshape(1, -1, *x.shape[2:])
@@ -320,6 +299,7 @@ class SynthesisLayer(torch.nn.Module):
         use_radial_filters  = False,    # Use radially symmetric downsampling filter? Ignored for critically sampled layers.
         conv_clamp          = 256,      # Clamp the output to [-X, +X], None = disable clamping.
         magnitude_ema_beta  = 0.999,    # Decay rate for the moving average of input magnitudes.
+        attention = True,               # Whether use attention mechanism
     ):
         super().__init__()
         self.w_dim = w_dim
@@ -370,6 +350,14 @@ class SynthesisLayer(torch.nn.Module):
         pad_hi = pad_total - pad_lo
         self.padding = [int(pad_lo[0]), int(pad_hi[0]), int(pad_lo[1]), int(pad_hi[1])]
 
+        self.attention = attention
+
+        if self.attention:
+            dtype = torch.float16 if self.use_fp16 else torch.float32
+            # Initialize SEBlock here
+            self.se_block = SEBlock(self.out_channels, dtype)  # SEBlock nesnesini burada oluşturuyoruz
+
+
     def forward(self, x, w, noise_mode='random', force_fp32=False, update_emas=False):
         assert noise_mode in ['random', 'const', 'none'] # unused
         misc.assert_shape(x, [None, self.in_channels, int(self.in_size[1]), int(self.in_size[0])])
@@ -391,7 +379,11 @@ class SynthesisLayer(torch.nn.Module):
         # Execute modulated conv2d.
         dtype = torch.float16 if (self.use_fp16 and not force_fp32 and x.device.type == 'cuda') else torch.float32
         x = modulated_conv2d(x=x.to(dtype), w=self.weight, s=styles,
-            padding=self.conv_kernel-1, demodulate=(not self.is_torgb), input_gain=input_gain, attention=True)
+            padding=self.conv_kernel-1, demodulate=(not self.is_torgb), input_gain=input_gain)
+
+        if self.attention:
+            # Apply SEBlock for attention   
+            x = self.se_block(x)
 
         # Execute bias, filtered leaky ReLU, and clamping.
         gain = 1 if self.is_torgb else np.sqrt(2)
