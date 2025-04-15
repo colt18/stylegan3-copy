@@ -289,7 +289,7 @@ def training_loop(
                     misc.nan_to_num(flat, nan=0, posinf=1e5, neginf=-1e5, out=flat)
                     grads = flat.split([param.numel() for param in params])
                     for param, grad in zip(params, grads):
-                        param.grad = grad.reshape(param.shape)
+                        param.grad = grad.reshape(param.shape).to(param.dtype)
                 phase.opt.step()
 
             # Phase done.
