@@ -19,26 +19,25 @@ from torch_utils import persistence
 from torch_utils.ops import conv2d_gradfix
 from torch_utils.ops import filtered_lrelu
 from torch_utils.ops import bias_act
-
+from torch.amp import autocast 
+from torch import nn
 #----------------------------------------------------------------------------
 
-class SEBlock(torch.nn.Module):
-    def __init__(self, in_channels, dtype=torch.float16):
+class SEBlock(nn.Module):
+    def __init__(self, in_channels):
         super(SEBlock, self).__init__()
-        self.dtype = dtype
-        self.avg_pool = torch.nn.AdaptiveAvgPool2d(1)
-        self.fc1 = torch.nn.Conv2d(in_channels, in_channels, 1, bias=False).to(dtype)
-        self.fc2 = torch.nn.Conv2d(in_channels, in_channels, 1, bias=False).to(dtype)
-        self.sigmoid = torch.nn.Sigmoid().to(dtype)
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc1 = nn.Conv2d(in_channels, in_channels, kernel_size=1, bias=False)
+        self.fc2 = nn.Conv2d(in_channels, in_channels, kernel_size=1, bias=False)
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        x = x.to(self.dtype)
-        y = self.avg_pool(x)
-        y = F.relu(self.fc1(y))
-        y = self.fc2(y)
-        y = self.sigmoid(y)
-        return x * y
-
+        with autocast(device_type='cuda'):
+            y = self.avg_pool(x)
+            y = F.relu(self.fc1(y))
+            y = self.fc2(y)
+            y = self.sigmoid(y)
+            return x * y
 
 
 @misc.profiled_function
@@ -299,7 +298,7 @@ class SynthesisLayer(torch.nn.Module):
         use_radial_filters  = False,    # Use radially symmetric downsampling filter? Ignored for critically sampled layers.
         conv_clamp          = 256,      # Clamp the output to [-X, +X], None = disable clamping.
         magnitude_ema_beta  = 0.999,    # Decay rate for the moving average of input magnitudes.
-        attention = True,               # Whether use attention mechanism
+        attention = True,              # Whether use attention mechanism
     ):
         super().__init__()
         self.w_dim = w_dim
@@ -353,9 +352,8 @@ class SynthesisLayer(torch.nn.Module):
         self.attention = attention
 
         if self.attention:
-            dtype = torch.float16 if self.use_fp16 else torch.float32
-            # Initialize SEBlock here
-            self.se_block = SEBlock(self.out_channels, dtype)  # SEBlock nesnesini burada oluşturuyoruz
+            self.se_block = SEBlock(self.out_channels) # Initialize SEBlock here
+
 
 
     def forward(self, x, w, noise_mode='random', force_fp32=False, update_emas=False):
@@ -380,11 +378,11 @@ class SynthesisLayer(torch.nn.Module):
         dtype = torch.float16 if (self.use_fp16 and not force_fp32 and x.device.type == 'cuda') else torch.float32
         x = modulated_conv2d(x=x.to(dtype), w=self.weight, s=styles,
             padding=self.conv_kernel-1, demodulate=(not self.is_torgb), input_gain=input_gain)
-
+       
+        # Execute attention       
         if self.attention:
-            # Apply SEBlock for attention   
             x = self.se_block(x)
-
+  
         # Execute bias, filtered leaky ReLU, and clamping.
         gain = 1 if self.is_torgb else np.sqrt(2)
         slope = 1 if self.is_torgb else 0.2
