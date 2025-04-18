@@ -147,7 +147,7 @@ def parse_comma_separated_list(s):
 @click.option('--glr',          help='G learning rate  [default: varies]', metavar='FLOAT',     type=click.FloatRange(min=0))
 @click.option('--dlr',          help='D learning rate', metavar='FLOAT',                        type=click.FloatRange(min=0), default=0.002, show_default=True)
 @click.option('--map-depth',    help='Mapping network depth  [default: varies]', metavar='INT', type=click.IntRange(min=1))
-@click.option('--mbstd-group',  help='Minibatch std group size', metavar='INT',                 type=click.IntRange(min=1), default=4, show_default=True)
+@click.option('--mbstd-group',  help='Minibatch std group size', metavar='INT',                 type=click.IntRange(min=1), default=2, show_default=True)
 
 # Misc settings.
 @click.option('--desc',         help='String to include in result dir name', metavar='STR',     type=str)
@@ -160,6 +160,11 @@ def parse_comma_separated_list(s):
 @click.option('--nobench',      help='Disable cuDNN benchmarking', metavar='BOOL',              type=bool, default=False, show_default=True)
 @click.option('--workers',      help='DataLoader worker processes', metavar='INT',              type=click.IntRange(min=1), default=3, show_default=True)
 @click.option('-n','--dry-run', help='Print training options and exit',                         is_flag=True)
+
+# Experimental settings.
+@click.option('--num_layers',   help='Number of layers in the model',           metavar='INT', type=click.IntRange(5, 14), default=14, show_default=True)
+@click.option('--attention',    help='Use attention mechanism', metavar='BOOL', type=bool, default=False, show_default=True)
+@click.option('--demodulate',   help='Use weight demodulation', metavar='BOOL', type=bool, default=True, show_default=True)
 
 def main(**kwargs):
     """Train a GAN using the techniques described in the paper
@@ -189,8 +194,8 @@ def main(**kwargs):
     c = dnnlib.EasyDict() # Main config dict.
     c.G_kwargs = dnnlib.EasyDict(class_name=None, z_dim=512, w_dim=512, mapping_kwargs=dnnlib.EasyDict())
     c.D_kwargs = dnnlib.EasyDict(class_name='training.networks_stylegan2.Discriminator', block_kwargs=dnnlib.EasyDict(), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
-    c.G_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8)
-    c.D_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8)
+    c.G_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0.00,0.99], eps=1e-8)
+    c.D_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0.00,0.99], eps=1e-8)
     c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.StyleGAN2Loss')
     c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, prefetch_factor=2)
 
@@ -219,6 +224,11 @@ def main(**kwargs):
     c.image_snapshot_ticks = c.network_snapshot_ticks = opts.snap
     c.random_seed = c.training_set_kwargs.random_seed = opts.seed
     c.data_loader_kwargs.num_workers = opts.workers
+
+    # Experimental kwargs
+    c.G_kwargs.num_layers = opts.num_layers
+    c.G_kwargs.attention = opts.attention
+    c.G_kwargs.demodulate = opts.demodulate
 
     # Sanity checks.
     if c.batch_size % c.num_gpus != 0:
@@ -273,7 +283,7 @@ def main(**kwargs):
         c.cudnn_benchmark = False
 
     # Description string.
-    desc = f'{opts.cfg:s}-{dataset_name:s}-gpus{c.num_gpus:d}-batch{c.batch_size:d}-gamma{c.loss_kwargs.r1_gamma:g}'
+    desc = f'{opts.cfg:s}-{dataset_name:s}-gpus{c.num_gpus:d}-batch{c.batch_size:d}-layers{opts.num_layers:d}-attention{opts.attention:d}-demod{opts.demodulate:d}'
     if opts.desc is not None:
         desc += f'-{opts.desc}'
 
