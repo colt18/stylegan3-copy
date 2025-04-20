@@ -296,7 +296,7 @@ class SynthesisLayer(torch.nn.Module):
         use_radial_filters  = False,    # Use radially symmetric downsampling filter? Ignored for critically sampled layers.
         conv_clamp          = 256,      # Clamp the output to [-X, +X], None = disable clamping.
         magnitude_ema_beta  = 0.999,    # Decay rate for the moving average of input magnitudes.
-        attention = True,               # Whether use attention mechanism
+        attention = False,               # Whether use attention mechanism
         demodulate = True,              # Whether conduct demodulation
     ):
         super().__init__()
@@ -386,7 +386,7 @@ class SynthesisLayer(torch.nn.Module):
             
        
         # Execute attention       
-        if self.attention:
+        if self.attention and not self.is_torgb:
             x = self.se_block(x)    
   
         # Execute bias, filtered leaky ReLU, and clamping.
