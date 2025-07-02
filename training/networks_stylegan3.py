@@ -22,22 +22,100 @@ from torch_utils.ops import bias_act
 from torch.amp import autocast 
 from torch import nn
 #----------------------------------------------------------------------------
-
+# SE attention
 class SEBlock(nn.Module):
-    def __init__(self, in_channels):
+    def __init__(self, in_channels, reduction=16):
         super(SEBlock, self).__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.fc1 = nn.Conv2d(in_channels, in_channels, kernel_size=1, bias=False)
-        self.fc2 = nn.Conv2d(in_channels, in_channels, kernel_size=1, bias=False)
+        self.fc = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels // reduction, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels // reduction, in_channels, 1, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        y = self.avg_pool(x)
+        y = self.fc(y)
+        return x * y
+
+
+# CBAM attention
+
+class ChannelAttention(nn.Module):
+    def __init__(self, in_channels, reduction=16):
+        super(ChannelAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels // reduction, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels // reduction, in_channels, 1, bias=False)
+        )
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        with autocast(device_type='cuda'):
-            y = self.avg_pool(x)
-            y = F.relu(self.fc1(y))
-            y = self.fc2(y)
-            y = self.sigmoid(y)
-            return x * y
+        avg_out = self.fc(self.avg_pool(x))
+        max_out = self.fc(self.max_pool(x))
+        out = avg_out + max_out
+        return self.sigmoid(out)
+
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention, self).__init__()
+        assert kernel_size in (3,7), 'kernel size must be 3 or 7'
+        padding = 3 if kernel_size == 7 else 1
+        self.conv = nn.Conv2d(2,1,kernel_size,padding=padding,bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out,_ = torch.max(x, dim=1, keepdim=True)
+        concat = torch.cat([avg_out, max_out], dim=1)
+        out = self.conv(concat)
+        return self.sigmoid(out)
+
+class CBAM(nn.Module):
+    def __init__(self, in_channels, reduction=16, spatial_kernel=7):
+        super(CBAM, self).__init__()
+        self.channel_attention = ChannelAttention(in_channels, reduction)
+        self.spatial_attention = SpatialAttention(spatial_kernel)
+
+    def forward(self, x):
+        out = x * self.channel_attention(x)
+        out = out * self.spatial_attention(out)
+        return out
+# self attention
+
+class SelfAttention(nn.Module):
+    def __init__(self, in_channels):
+        super(SelfAttention, self).__init__()
+        self.query_conv = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+        self.key_conv = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+        self.value_conv = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.gamma = nn.Parameter(torch.zeros(1))  # learnable scale factor
+
+    def forward(self, x):
+        batch_size, C, width, height = x.size()
+
+        # Queries, Keys, Values
+        proj_query = self.query_conv(x).view(batch_size, -1, width * height)  # B x C' x N
+        proj_key = self.key_conv(x).view(batch_size, -1, width * height)      # B x C' x N
+        proj_value = self.value_conv(x).view(batch_size, -1, width * height)  # B x C x N
+
+        # Attention map
+        energy = torch.bmm(proj_query.permute(0, 2, 1), proj_key)  # B x N x N
+        attention = F.softmax(energy, dim=-1)                      # B x N x N
+
+        # Apply attention to values
+        out = torch.bmm(proj_value, attention.permute(0, 2, 1))    # B x C x N
+        out = out.view(batch_size, C, width, height)
+
+        # Weighted sum with input (residual)
+        out = self.gamma * out + x
+        return out
+
+
 
 
 @misc.profiled_function
@@ -351,8 +429,15 @@ class SynthesisLayer(torch.nn.Module):
 
         self.attention = attention
 
-        if self.attention:
-            self.se_block = SEBlock(self.out_channels) # Initialize SEBlock here
+       if self.attention:
+           if self.attention == 'se':
+               self.attn_block = SEBlock(self.out_channels)
+           elif self.attention == 'cbam':
+               self.attn_block = CBAM(self.out_channels)
+           elif self.attention == 'self':
+               self.attn_block = SelfAttention(self.out_channels)
+           else:
+               raise ValueError(f"Unknown attention type: {self.attention}"
 
 
 
@@ -387,7 +472,7 @@ class SynthesisLayer(torch.nn.Module):
        
         # Execute attention       
         if self.attention and not self.is_torgb:
-            x = self.se_block(x)    
+            x = self.attn_block(x)    
   
         # Execute bias, filtered leaky ReLU, and clamping.
         gain = 1 if self.is_torgb else np.sqrt(2)
