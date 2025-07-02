@@ -163,7 +163,8 @@ def parse_comma_separated_list(s):
 
 # Experimental settings.
 @click.option('--num_layers',   help='Number of layers in the model',           metavar='INT', type=click.IntRange(5, 14), default=14, show_default=True)
-@click.option('--attention',    help='Use attention mechanism', metavar='BOOL', type=bool, default=False, show_default=True)
+# @click.option('--attention',    help='Use attention mechanism', metavar='BOOL', type=bool, default=False, show_default=True)
+@click.option('--attention', help='Attention type', type=click.Choice(['none', 'cbam', 'se', 'self']), default='none', show_default=True)
 @click.option('--demodulate',   help='Use weight demodulation', metavar='BOOL', type=bool, default=True, show_default=True)
 
 def main(**kwargs):
@@ -227,7 +228,8 @@ def main(**kwargs):
 
     # Experimental kwargs
     c.G_kwargs.num_layers = opts.num_layers
-    c.G_kwargs.attention = opts.attention
+    # c.G_kwargs.attention = opts.attention
+    c.G_kwargs.attention = None if opts.attention == 'none' else opts.attention
     c.G_kwargs.demodulate = opts.demodulate
 
     # Sanity checks.
