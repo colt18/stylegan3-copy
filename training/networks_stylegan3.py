@@ -35,9 +35,10 @@ class SEBlock(nn.Module):
         )
 
     def forward(self, x):
-        y = self.avg_pool(x)
-        y = self.fc(y)
-        return x * y
+        with autocast(device_type='cuda'):
+            y = self.avg_pool(x)
+            y = self.fc(y)
+            return x * y
 
 
 # CBAM attention
@@ -55,10 +56,11 @@ class ChannelAttention(nn.Module):
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        avg_out = self.fc(self.avg_pool(x))
-        max_out = self.fc(self.max_pool(x))
-        out = avg_out + max_out
-        return self.sigmoid(out)
+        with autocast(device_type='cuda'):
+            avg_out = self.fc(self.avg_pool(x))
+            max_out = self.fc(self.max_pool(x))
+            out = avg_out + max_out
+            return self.sigmoid(out)
 
 class SpatialAttention(nn.Module):
     def __init__(self, kernel_size=7):
@@ -69,11 +71,12 @@ class SpatialAttention(nn.Module):
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        avg_out = torch.mean(x, dim=1, keepdim=True)
-        max_out,_ = torch.max(x, dim=1, keepdim=True)
-        concat = torch.cat([avg_out, max_out], dim=1)
-        out = self.conv(concat)
-        return self.sigmoid(out)
+        with autocast(device_type='cuda'):
+            avg_out = torch.mean(x, dim=1, keepdim=True)
+            max_out,_ = torch.max(x, dim=1, keepdim=True)
+            concat = torch.cat([avg_out, max_out], dim=1)
+            out = self.conv(concat)
+            return self.sigmoid(out)
 
 class CBAM(nn.Module):
     def __init__(self, in_channels, reduction=16, spatial_kernel=7):
@@ -82,9 +85,11 @@ class CBAM(nn.Module):
         self.spatial_attention = SpatialAttention(spatial_kernel)
 
     def forward(self, x):
-        out = x * self.channel_attention(x)
-        out = out * self.spatial_attention(out)
-        return out
+        with autocast(device_type='cuda'):
+            out = x * self.channel_attention(x)
+            out = out * self.spatial_attention(out)
+            return out
+
 # self attention
 
 class SelfAttention(nn.Module):
@@ -96,24 +101,25 @@ class SelfAttention(nn.Module):
         self.gamma = nn.Parameter(torch.zeros(1))  # learnable scale factor
 
     def forward(self, x):
-        batch_size, C, width, height = x.size()
+        with autocast(device_type='cuda'):
+            batch_size, C, width, height = x.size()
 
-        # Queries, Keys, Values
-        proj_query = self.query_conv(x).view(batch_size, -1, width * height)  # B x C' x N
-        proj_key = self.key_conv(x).view(batch_size, -1, width * height)      # B x C' x N
-        proj_value = self.value_conv(x).view(batch_size, -1, width * height)  # B x C x N
+            # Queries, Keys, Values
+            proj_query = self.query_conv(x).view(batch_size, -1, width * height)  # B x C' x N
+            proj_key = self.key_conv(x).view(batch_size, -1, width * height)      # B x C' x N
+            proj_value = self.value_conv(x).view(batch_size, -1, width * height)  # B x C x N
 
-        # Attention map
-        energy = torch.bmm(proj_query.permute(0, 2, 1), proj_key)  # B x N x N
-        attention = F.softmax(energy, dim=-1)                      # B x N x N
+            # Attention map
+            energy = torch.bmm(proj_query.permute(0, 2, 1), proj_key)  # B x N x N
+            attention = F.softmax(energy, dim=-1)                      # B x N x N
 
-        # Apply attention to values
-        out = torch.bmm(proj_value, attention.permute(0, 2, 1))    # B x C x N
-        out = out.view(batch_size, C, width, height)
+            # Apply attention to values
+            out = torch.bmm(proj_value, attention.permute(0, 2, 1))    # B x C x N
+            out = out.view(batch_size, C, width, height)
 
-        # Weighted sum with input (residual)
-        out = self.gamma * out + x
-        return out
+            # Weighted sum with input (residual)
+            out = self.gamma * out + x
+            return out
 
 
 
@@ -432,10 +438,13 @@ class SynthesisLayer(torch.nn.Module):
         if self.attention:
             if self.attention == 'se':
                 self.attn_block = SEBlock(self.out_channels)
+               
             elif self.attention == 'cbam':
                 self.attn_block = CBAM(self.out_channels)
+               
             elif self.attention == 'self':
                 self.attn_block = SelfAttention(self.out_channels)
+              
             else:
                 raise ValueError (f"Unknown attention type: {self.attention}")
 
@@ -573,6 +582,10 @@ class SynthesisNetwork(torch.nn.Module):
             is_torgb = (idx == self.num_layers)
             is_critically_sampled = (idx >= self.num_layers - self.num_critical)
             use_fp16 = (sampling_rates[idx] * (2 ** self.num_fp16_res) > self.img_resolution)
+                # L8 ve altı için attention türünü ver, sonrası için False (kapalı)
+            attention_type = layer_kwargs.get('attention', False)
+            if attention_type and idx > 8:
+                attention_type = False
             layer = SynthesisLayer(
                 w_dim=self.w_dim, is_torgb=is_torgb, is_critically_sampled=is_critically_sampled, use_fp16=use_fp16,
                 in_channels=int(channels[prev]), out_channels= int(channels[idx]),
@@ -580,7 +593,9 @@ class SynthesisNetwork(torch.nn.Module):
                 in_sampling_rate=int(sampling_rates[prev]), out_sampling_rate=int(sampling_rates[idx]),
                 in_cutoff=cutoffs[prev], out_cutoff=cutoffs[idx],
                 in_half_width=half_widths[prev], out_half_width=half_widths[idx],
-                **layer_kwargs)
+                attention=attention_type,
+                **{k: v for k, v in layer_kwargs.items() if k != 'attention'}
+                )
             name = f'L{idx}_{layer.out_size[0]}_{layer.out_channels}'
             setattr(self, name, layer)
             self.layer_names.append(name)
