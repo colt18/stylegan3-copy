@@ -429,15 +429,15 @@ class SynthesisLayer(torch.nn.Module):
 
         self.attention = attention
 
-       if self.attention:
-           if self.attention == 'se':
-               self.attn_block = SEBlock(self.out_channels)
-           elif self.attention == 'cbam':
-               self.attn_block = CBAM(self.out_channels)
-           elif self.attention == 'self':
-               self.attn_block = SelfAttention(self.out_channels)
-           else:
-               raise ValueError(f"Unknown attention type: {self.attention}"
+        if self.attention:
+            if self.attention == 'se':
+                self.attn_block = SEBlock(self.out_channels)
+            elif self.attention == 'cbam':
+                self.attn_block = CBAM(self.out_channels)
+            elif self.attention == 'self':
+                self.attn_block = SelfAttention(self.out_channels)
+            else:
+                raise ValueError (f"Unknown attention type: {self.attention}")
 
 
 
