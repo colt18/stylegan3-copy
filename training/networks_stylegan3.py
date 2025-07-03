@@ -90,39 +90,6 @@ class CBAM(nn.Module):
             out = out * self.spatial_attention(out)
             return out
 
-# self attention
-
-class SelfAttention(nn.Module):
-    def __init__(self, in_channels):
-        super(SelfAttention, self).__init__()
-        self.query_conv = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
-        self.key_conv = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
-        self.value_conv = nn.Conv2d(in_channels, in_channels, kernel_size=1)
-        self.gamma = nn.Parameter(torch.zeros(1))  # learnable scale factor
-
-    def forward(self, x):
-        with autocast(device_type='cuda'):
-            batch_size, C, width, height = x.size()
-
-            # Queries, Keys, Values
-            proj_query = self.query_conv(x).view(batch_size, -1, width * height)  # B x C' x N
-            proj_key = self.key_conv(x).view(batch_size, -1, width * height)      # B x C' x N
-            proj_value = self.value_conv(x).view(batch_size, -1, width * height)  # B x C x N
-
-            # Attention map
-            energy = torch.bmm(proj_query.permute(0, 2, 1), proj_key)  # B x N x N
-            attention = F.softmax(energy, dim=-1)                      # B x N x N
-
-            # Apply attention to values
-            out = torch.bmm(proj_value, attention.permute(0, 2, 1))    # B x C x N
-            out = out.view(batch_size, C, width, height)
-
-            # Weighted sum with input (residual)
-            out = self.gamma * out + x
-            return out
-
-
-
 
 @misc.profiled_function
 def modulated_conv2d(
@@ -440,11 +407,8 @@ class SynthesisLayer(torch.nn.Module):
                 self.attn_block = SEBlock(self.out_channels)
                
             elif self.attention == 'cbam':
-                self.attn_block = CBAM(self.out_channels)
-               
-            elif self.attention == 'self':
-                self.attn_block = SelfAttention(self.out_channels)
-              
+                self.attn_block = CBAM(self.out_channels)    
+                
             else:
                 raise ValueError (f"Unknown attention type: {self.attention}")
 

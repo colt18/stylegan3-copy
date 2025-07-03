@@ -14,16 +14,38 @@ from torch_utils import training_stats
 from torch_utils.ops import conv2d_gradfix
 from torch_utils.ops import upfirdn2d
 
+
+
+def color_consistency_loss(real_img, fake_img):
+    # real_img, fake_img: [B, C, H, W], C=3 (RGB)
+    real_mean = real_img.mean(dim=[2,3])  # [B, C]
+    fake_mean = fake_img.mean(dim=[2,3])  # [B, C]
+    real_std = real_img.std(dim=[2,3])    # [B, C]
+    fake_std = fake_img.std(dim=[2,3])    # [B, C]
+
+    mean_loss = torch.nn.functional.mse_loss(fake_mean, real_mean)
+    std_loss = torch.nn.functional.mse_loss(fake_std, real_std)
+    return mean_loss + std_loss
+
+
+def compute_identity_loss(real_img, gen_img, vgg_extractor):
+    with torch.no_grad():
+        real_feat = vgg_extractor(real_img)
+        gen_feat = vgg_extractor(gen_img)
+    return torch.nn.functional.mse_loss(gen_feat, real_feat)
+
 #----------------------------------------------------------------------------
 
 class Loss:
     def accumulate_gradients(self, phase, real_img, real_c, gen_z, gen_c, gain, cur_nimg): # to be overridden by subclass
         raise NotImplementedError()
 
+
+
 #----------------------------------------------------------------------------
 
 class StyleGAN2Loss(Loss):
-    def __init__(self, device, G, D, augment_pipe=None, r1_gamma=10, style_mixing_prob=0, pl_weight=0, pl_batch_shrink=2, pl_decay=0.01, pl_no_weight_grad=False, blur_init_sigma=0, blur_fade_kimg=0):
+    def __init__(self, device, G, D, augment_pipe=None, r1_gamma=10, style_mixing_prob=0, pl_weight=0, pl_batch_shrink=2, pl_decay=0.01, pl_no_weight_grad=False, blur_init_sigma=0, blur_fade_kimg=0, aux_losses=None, aux_weights=None, vgg_extractor=None):
         super().__init__()
         self.device             = device
         self.G                  = G
@@ -38,6 +60,21 @@ class StyleGAN2Loss(Loss):
         self.pl_mean            = torch.zeros([], device=device)
         self.blur_init_sigma    = blur_init_sigma
         self.blur_fade_kimg     = blur_fade_kimg
+        self.vgg_extractor = vgg_extractor
+        self.aux_losses         = aux_losses or []
+        self.aux_weights        = aux_weights or []
+
+    def compute_aux_losses(self, real_img, gen_img):
+        total_aux_loss = 0.0
+        for loss_name, weight in zip(self.aux_losses, self.aux_weights):
+            if loss_name == 'color_consistency':         
+                loss = color_consistency_loss(real_img, gen_img)
+            elif loss_name == 'identity':
+                loss = compute_identity_loss(real_img, gen_img, self.vgg_extractor)
+            else:
+                continue
+            total_aux_loss += weight * loss
+        return total_aux_loss
 
     def run_G(self, z, c, update_emas=False):
         ws = self.G.mapping(z, c, update_emas=update_emas)
@@ -75,7 +112,12 @@ class StyleGAN2Loss(Loss):
                 gen_logits = self.run_D(gen_img, gen_c, blur_sigma=blur_sigma)
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
+                
                 loss_Gmain = torch.nn.functional.softplus(-gen_logits) # -log(sigmoid(gen_logits))
+                # Calculate aux loss
+                aux_loss = self.compute_aux_losses(real_img, gen_img) if self.aux_losses else 0.0
+                # Add to Gmain
+                loss_Gmain = loss_Gmain.mean() + aux_loss
                 training_stats.report('Loss/G/loss', loss_Gmain)
             with torch.autograd.profiler.record_function('Gmain_backward'):
                 loss_Gmain.mean().mul(gain).backward()

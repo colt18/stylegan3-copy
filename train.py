@@ -21,6 +21,8 @@ from training import training_loop
 from metrics import metric_main
 from torch_utils import training_stats
 from torch_utils import custom_ops
+import torchvision.models as models
+import torch.nn as nn
 
 #----------------------------------------------------------------------------
 
@@ -64,7 +66,10 @@ def launch_training(c, desc, outdir, dry_run):
     # Print options.
     print()
     print('Training options:')
+    # JSON print öncesi kaldır
+    temp = c.loss_kwargs.pop("vgg_extractor")
     print(json.dumps(c, indent=2))
+    c.loss_kwargs["vgg_extractor"] = temp
     print()
     print(f'Output directory:    {c.run_dir}')
     print(f'Number of GPUs:      {c.num_gpus}')
@@ -86,7 +91,10 @@ def launch_training(c, desc, outdir, dry_run):
     print('Creating output directory...')
     os.makedirs(c.run_dir)
     with open(os.path.join(c.run_dir, 'training_options.json'), 'wt') as f:
-        json.dump(c, f, indent=2)
+        # JSON print öncesi kaldır
+        temp = c.loss_kwargs.pop("vgg_extractor")
+        print(json.dumps(c, indent=2))
+        c.loss_kwargs["vgg_extractor"] = temp
 
     # Launch processes.
     print('Launching processes...')
@@ -164,8 +172,11 @@ def parse_comma_separated_list(s):
 # Experimental settings.
 @click.option('--num_layers',   help='Number of layers in the model',           metavar='INT', type=click.IntRange(5, 14), default=14, show_default=True)
 # @click.option('--attention',    help='Use attention mechanism', metavar='BOOL', type=bool, default=False, show_default=True)
-@click.option('--attention', help='Attention type', type=click.Choice(['none', 'cbam', 'se', 'self']), default='none', show_default=True)
+@click.option('--attention', help='Attention type', type=click.Choice(['none', 'cbam', 'se']), default='none', show_default=True)
 @click.option('--demodulate',   help='Use weight demodulation', metavar='BOOL', type=bool, default=True, show_default=True)
+@click.option('--aux-losses', help='Comma separated list of auxiliary losses to apply. Possible values: color_consistency, identity', type=str, default='', show_default=True) 
+@click.option('--aux-weights', help='Comma separated list of weights for auxiliary losses, in the same order as --aux-losses', type=str, default='', show_default=True)
+
 
 def main(**kwargs):
     """Train a GAN using the techniques described in the paper
@@ -190,6 +201,20 @@ def main(**kwargs):
         --gpus=8 --batch=32 --gamma=10 --mirror=1 --aug=noaug
     """
 
+
+    class VGGConv4FeatureExtractor(torch.nn.Module):
+        def __init__(self, device):
+            super().__init__()
+            vgg = torch.load('vgg16.pt', map_location=device, weights_only=False)
+            vgg.to(device).eval()
+            self.features = torch.nn.Sequential(*list(vgg.features.children())[:34])
+            for p in self.features.parameters():
+                p.requires_grad = False
+
+        def forward(self, x):
+            return self.features(x)
+    
+
     # Initialize config.
     opts = dnnlib.EasyDict(kwargs) # Command line arguments.
     c = dnnlib.EasyDict() # Main config dict.
@@ -197,7 +222,16 @@ def main(**kwargs):
     c.D_kwargs = dnnlib.EasyDict(class_name='training.networks_stylegan2.Discriminator', block_kwargs=dnnlib.EasyDict(), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
     c.G_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0.00,0.99], eps=1e-8)
     c.D_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0.00,0.99], eps=1e-8)
-    c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.StyleGAN2Loss')
+
+    # Experimental loss
+    aux_losses = [x.strip() for x in kwargs['aux_losses'].split(',')] if kwargs['aux_losses'] else []
+    aux_weights = [float(x.strip()) for x in kwargs['aux_weights'].split(',')] if kwargs['aux_weights'] else []
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    
+    vgg_extractor = VGGConv4FeatureExtractor(device).to(device)
+    c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.StyleGAN2Loss', aux_losses=aux_losses, aux_weights=aux_weights, vgg_extractor=vgg_extractor)
+
     c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, prefetch_factor=2)
 
     # Training set.
@@ -285,7 +319,7 @@ def main(**kwargs):
         c.cudnn_benchmark = False
 
     # Description string.
-    desc = f'{opts.cfg:s}-{dataset_name:s}-gpus{c.num_gpus:d}-batch{c.batch_size:d}-layers{opts.num_layers:d}-attention{opts.attention}-demod{opts.demodulate:d}'
+    desc = f'{opts.cfg:s}-{dataset_name:s}-gpus{c.num_gpus:d}-batch{c.batch_size:d}-layers{opts.num_layers:d}-attention{opts.attention}-demod{opts.demodulate:d}-loss{opts.aux_losses}'
     if opts.desc is not None:
         desc += f'-{opts.desc}'
 
