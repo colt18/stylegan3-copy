@@ -21,8 +21,6 @@ from training import training_loop
 from metrics import metric_main
 from torch_utils import training_stats
 from torch_utils import custom_ops
-import torchvision.models as models
-import torch.nn as nn
 
 #----------------------------------------------------------------------------
 
@@ -319,7 +317,7 @@ def main(**kwargs):
         c.cudnn_benchmark = False
 
     # Description string.
-    desc = f'{opts.cfg:s}-{dataset_name:s}-gpus{c.num_gpus:d}-batch{c.batch_size:d}-layers{opts.num_layers:d}-attention{opts.attention}-demod{opts.demodulate:d}-loss{opts.aux_losses}'
+    desc = f'{opts.cfg:s}-{dataset_name:s}-gpus{c.num_gpus:d}-batch{c.batch_size:d}-layers{opts.num_layers:d}-attention{opts.attention}-demod{opts.demodulate:d}-loss{opts.aux_losses}-lossweights{opts.aux_weights}'
     if opts.desc is not None:
         desc += f'-{opts.desc}'
 
